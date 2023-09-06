@@ -33,6 +33,8 @@ KODI_PORT = 8080
 KODI_WEBSOCKET_PORT = 9090
 start_time = 0
 executor = ThreadPoolExecutor(1)  # Create a thread pool with one worker thread
+DEFAULT_SOUND_INPUT = "Microphone (2 - High Definition Audio Device)"
+# "SPDIF (RME HDSPe RayDAT), MME"
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -186,7 +188,7 @@ def continuous_recording():
 
     #print(sd.query_devices())
 
-    with sd.InputStream(device="SPDIF (RME HDSPe RayDAT), MME", samplerate=SAMPLERATE, channels=1, dtype='int16') as stream:
+    with sd.InputStream(device=DEFAULT_SOUND_INPUT, samplerate=SAMPLERATE, channels=1, dtype='int16') as stream:
         while not stop_event.is_set():
                 audio_chunk, overflowed = stream.read(SAMPLERATE)  # Read 1 second of audio
                 audio_buffer.extend(audio_chunk)
@@ -194,7 +196,7 @@ def continuous_recording():
 def momentary_recording():
     global audio_buffer
 
-    with sd.InputStream(device="SPDIF (RME HDSPe RayDAT), MME", samplerate=SAMPLERATE, channels=1, dtype='int16') as stream:
+    with sd.InputStream(device=DEFAULT_SOUND_INPUT, samplerate=SAMPLERATE, channels=1, dtype='int16') as stream:
         audio_chunk, overflowed = stream.read(SAMPLERATE)  # Read 1 second of audio
         audio_buffer.extend(audio_chunk)
 
@@ -486,6 +488,31 @@ def start_websocket():
             print("WebSocket disconnected. Reconnecting...")
     print("WebSocket thread stopping")
 
+def print_menu(devices):
+    print("Available sound devices:")
+    for i, device in enumerate(devices):
+        print(f"{i+1}. {device['name']}")
+    print("0. Exit")
+
+def choose_device(devices):
+    while True:
+        print_menu(devices)
+        choice = input("Select a sound device: ")
+        if choice.isdigit():
+            choice = int(choice)
+            if choice == 0:
+                print("Exiting...")
+                break
+            elif 1 <= choice <= len(devices):
+                selected_device = devices[choice - 1]
+                print(f"You selected: {selected_device['name']}")
+                # Do something with the selected device
+                break
+            else:
+                print("Invalid choice. Please try again.")
+        else:
+            print("Invalid input. Please enter a number.")
+
 
 def print_colored_cd_art():
     art = """
@@ -508,6 +535,8 @@ def print_colored_cd_art():
 
 if __name__ == '__main__':
     print_colored_cd_art()
+    devices = sd.query_devices()
+    choose_device(devices)
 
     tracklist_dict = db_read_by_key('tracklist')
 

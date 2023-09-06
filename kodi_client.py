@@ -27,7 +27,6 @@ BUFFER_DURATION = 10  # seconds
 SAMPLERATE = 16000
 BUFFER_SIZE = BUFFER_DURATION * SAMPLERATE
 audio_buffer = deque(maxlen=BUFFER_SIZE)
-API_KEY = 'AIzaSyCZqWOAx83JGiYA-bmWeHxuQILqf2dP4HY'  # Replace with your YouTube API key
 KODI_IP = '192.168.1.212'
 KODI_PORT = 8080 
 KODI_WEBSOCKET_PORT = 9090
@@ -107,82 +106,16 @@ def db_read_by_key(key, filename='app.json'):
             return data.get(key, None)
         except FileNotFoundError:
             return {}
-
-@app.route('/cddb', methods=['GET'])
-def cddb():
-    discid = request.args.get('discid', default=None, type=str)
-    if not discid or discid is "00000001" or None is discid:
-        return jsonify({"error": "Missing discid"}), 400
+  
+@app.route('/buffer', methods=['POST'])
+def post_buffer():
+    # Do something when the notification request is received.
+    # In this example, simply send the recorded audio buffer back as a JSON response.
     
-    if discid in tracklist_dict:
-        print("Already exists in DB")
-        return jsonify({"result": "Already exists in DB"}), 202
+    # Serialize the audio_buffer to JSON
+    audio_json = json.dumps(audio_buffer)
     
-    # Initialize MusicBrainz
-    musicbrainzngs.set_useragent("Retrogaming CD to Youtube music video by CyberLuke", "0.9", "https://github.com/cyberluke")
-    #musicbrainzngs.set_email("info@nanotrik.cz")  # Set email
-    
-    try:
-        # Query MusicBrainz by discid
-        #result = musicbrainzngs.search_releases(query="freedbid:{}".format(discid), includes=["artists", "recordings"])
-        #result = musicbrainzngs.search_releases(query="mbid:{}".format(discid), includes=["artists", "recordings"])
-        result = musicbrainzngs.get_releases_by_discid(discid, includes=["artists", "recordings"]);
-        
-        # Extract needed information
-        #print(dumps(result, indent = 4, ensure_ascii = False))
-        releases = result.get('disc', {}).get('release-list', [])
-        if releases:
-            release = releases[0]
-            artist = unidecode.unidecode(result["disc"]["release-list"][0]["artist-credit-phrase"])
-            #artist = release.get('artist-credit', [{}])[0].get('name-credit', [{}])[0].get('name', 'Unknown')
-            #artist = result["release"]["artist-credit"][0]["name-credit"]["name"]
-            #artist = release.get('artist-credit', [{}])[0].get('name-credit', 'Unknown')
-            track_list = []
-            for medium in release.get('medium-list', []):
-                for track in medium.get('track-list', []):
-                    track_list.append({
-                        'artist': artist,
-                        'track': unidecode.unidecode(track.get('recording', {}).get('title', 'Unknown')),
-                    })
-                    
-            # Save tracklist in data structure
-            tracklist_dict[discid] = track_list            
-            print(dumps(tracklist_dict, indent = 4, ensure_ascii = True))
-            db_update_by_key('tracklist', tracklist_dict)
-            return unidecode.unidecode(json.dumps(track_list,ensure_ascii = False))
-        
-        return jsonify({"error": "Disc not found"}), 404
-        
-    except musicbrainzngs.WebServiceError as exc:
-        print("Something went wrong with the request: %s" % exc)
-        return jsonify({"error": "Internal server error"}), 500
-    
-@app.route('/cdplay', methods=['GET'])
-def handle_cdplay():
-    #data = request.json
-    #print("Received data: {}".format(data))
-
-    discid = request.args.get('discid')
-    author = request.args.get('author')
-    trackName = request.args.get('trackName')
-    trackNumber = int(request.args.get('trackNumber'))-1
-    duration = request.args.get('duration')
-    playState = request.args.get('playState')
-
-    # Check if tracklist information exists for this discid
-    if discid in tracklist_dict and tracklist_dict[discid]:
-        #print(tracklist_dict[discid])
-        #int(tracklist_dict[discid]["duration"])
-        tracklist_dict[discid][int(trackNumber)]["duration"] = int(duration)
-        executor.submit(find_youtube_track, tracklist_dict[discid][int(trackNumber)]["artist"], tracklist_dict[discid][int(trackNumber)]["track"], time.time(), int(duration), discid, int(trackNumber))
-    else:    
-        time.sleep(0.1)
-        #recognized_song = recognize_song_from_buffer()
-        #print("Recognized song: {}".dumps(recognized_song, indent = 4, ensure_ascii = False))
-        # Run recognize_song_from_buffer asynchronously
-        #executor.submit(recognize_song_from_buffer, int(duration), time.time())
-
-    return jsonify({"message": "Recognition started"}), 202
+    return requests.Response(audio_json, content_type='application/json')
 
 def continuous_recording():
     global audio_buffer
@@ -538,8 +471,8 @@ def print_colored_cd_art():
 
 if __name__ == '__main__':
     print_colored_cd_art()
-    #devices = sd.query_devices()
-    #choose_device(devices)
+    devices = sd.query_devices()
+    choose_device(devices)
 
     tracklist_dict = db_read_by_key('tracklist')
 
@@ -554,12 +487,12 @@ if __name__ == '__main__':
         t1 = threading.Thread(target=continuous_recording, daemon=False)
         t1.start()
 
-        t2 = threading.Thread(target=start_websocket, daemon=True)
-        t2.start()
+        #t2 = threading.Thread(target=start_websocket, daemon=True)
+        #t2.start()
 
 
         # Run the Flask server
-        app.run(host='0.0.0.0', port=5000)
+        app.run(host='0.0.0.0', port=5123)
 
         
         t1.join()

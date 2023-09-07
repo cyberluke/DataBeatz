@@ -109,13 +109,10 @@ def db_read_by_key(key, filename='app.json'):
   
 @app.route('/buffer', methods=['POST'])
 def post_buffer():
-    # Do something when the notification request is received.
-    # In this example, simply send the recorded audio buffer back as a JSON response.
-    
-    # Serialize the audio_buffer to JSON
-    audio_json = json.dumps(audio_buffer)
-    
-    return requests.Response(audio_json, content_type='application/json')
+    global audio_buffer
+
+    # Sending the audio buffer as binary data
+    return requests.Response(audio_buffer, content_type='application/octet-stream')
 
 def continuous_recording():
     global audio_buffer

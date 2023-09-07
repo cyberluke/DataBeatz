@@ -10,3 +10,5 @@ musicbrainzngs
 unidecode==1.1.0
 websocket-client
 youtube-search
+typing
+scipy

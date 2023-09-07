@@ -1,3 +1,4 @@
+import io
 import json
 import time
 import webbrowser
@@ -21,6 +22,9 @@ import logging
 import unidecode
 import websocket
 from youtube_search import YoutubeSearch
+from scipy.signal import correlate, butter, filtfilt
+from scipy.ndimage import gaussian_filter1d
+import wave
 
 app = Flask(__name__)
 BUFFER_DURATION = 10  # seconds
@@ -116,7 +120,7 @@ def cddb():
     
     if discid in tracklist_dict:
         print("Already exists in DB")
-        return jsonify({"result": "Already exists in DB"}), 202
+        return unidecode.unidecode(json.dumps(tracklist_dict[discid],ensure_ascii = False))
     
     # Initialize MusicBrainz
     musicbrainzngs.set_useragent("Retrogaming CD to Youtube music video by CyberLuke", "0.9", "https://github.com/cyberluke")
@@ -183,6 +187,93 @@ def handle_cdplay():
         #executor.submit(recognize_song_from_buffer, int(duration), time.time())
 
     return jsonify({"message": "Recognition started"}), 202
+
+# Bandpass filter
+def bandpass_filter(signal, lowcut, highcut, fs, order=5):
+    nyquist = 0.5 * fs
+    low = lowcut / nyquist
+    high = highcut / nyquist
+    b, a = butter(order, [low, high], btype='band')
+    return filtfilt(b, a, signal)
+
+# Normalization
+def normalize(signal):
+    return (signal - np.mean(signal)) / np.std(signal)
+
+# Feature extraction, e.g., using a Gaussian filter as a stand-in for more complex methods
+def extract_features(signal):
+    return gaussian_filter1d(signal, 4)
+
+def find_delay(signal1, signal2, fs):
+    # Use FFT to speed-up cross-correlation
+    correlation = correlate(signal1, signal2, method='fft')
+
+    # Find the lag position
+    lag = np.argmax(np.abs(correlation))
+
+    # Calculate the actual lag in samples
+    actual_lag = lag - len(signal1) + 1
+
+    # Calculate the lag in milliseconds
+    delay_ms = (actual_lag / fs) * 1000
+
+    return delay_ms, actual_lag
+
+def list_to_wav_file(audio_data, file_name, sample_rate=SAMPLERATE):
+    with wave.open(file_name, 'wb') as wav_file:
+        # Set audio settings
+        n_channels = 1
+        sampwidth = 2  # 2 bytes because we use np.int16
+
+        # Set WAV file parameters
+        wav_file.setnchannels(n_channels)
+        wav_file.setsampwidth(sampwidth)
+        wav_file.setframerate(sample_rate)
+
+        # Write audio data to WAV file
+        wav_file.writeframes(audio_data.tobytes())
+
+def request_kodi_audio(isFirstHalfOnly = True):
+    # Send POST request to server
+    response = requests.post("http://{}:5123/buffer".format(KODI_IP))
+
+    # Check if the request was successful
+    if response.status_code == 200:
+        # Read the binary data into a variable
+        received_audio_buffer = response.content
+
+        # Convert the binary data to numpy array
+        audio_data_local = np.array(audio_buffer, dtype=np.int16)
+        audio_data_remote = np.frombuffer(received_audio_buffer, dtype=np.int16)
+
+        # Convert the numpy array to a deque
+        #received_audio_deque = deque(numpy_array)    
+
+        if isFirstHalfOnly:
+            audio_data_local = audio_data_local[:len(audio_data_local)//2]
+            audio_data_remote = audio_data_remote[:len(audio_data_remote)//2]
+
+        list_to_wav_file(audio_data_local, 'audio_data_local.wav')      
+        list_to_wav_file(audio_data_remote, 'audio_data_remote.wav')      
+
+        # Preprocessing
+        #audio_data_local = bandpass_filter(audio_data_local, 350, 1600, SAMPLERATE)
+        #audio_data_remote = bandpass_filter(audio_data_remote, 350, 1600, SAMPLERATE)
+
+        audio_data_local = normalize(audio_data_local)
+        audio_data_remote = normalize(audio_data_remote)
+
+        #audio_data_local = extract_features(audio_data_local)
+        #audio_data_remote = extract_features(audio_data_remote)
+
+        # Find delay using cross-correlation
+        delay_ms, actual_lag = find_delay(audio_data_remote, audio_data_local, SAMPLERATE)
+        print("delay_ms: {}".format(delay_ms))
+        print("actual_lag: {}".format(actual_lag))
+        return delay_ms
+    else: 
+        return 0
+
 
 def continuous_recording():
     global audio_buffer
@@ -323,8 +414,83 @@ def on_message(ws, message):
                     "value": new_time
                 })    
 
-            print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
+            #print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
 
+            time.sleep(BUFFER_DURATION + seconds)
+            perform_cross_delay_check(player_id)
+            #time.sleep(BUFFER_DURATION + 10)
+            #perform_cross_delay_check(player_id)
+
+
+def perform_cross_delay_check(player_id):
+            print("cross audio lag check")
+            delay_ms = request_kodi_audio(True)
+            delay_ms2 = request_kodi_audio()
+            #if abs(delay_ms) > 700 and abs(delay_ms2) > 700 or int(delay_ms) == int(delay_ms2):
+            if abs(delay_ms) > 700 and abs(delay_ms2) > 700:
+                delay_ms = delay_ms + delay_ms2 / 2
+                #delay_ms = max(delay_ms, delay_ms2)
+            else:    
+                delay_ms = min(delay_ms, delay_ms2)
+                #delay_ms = delay_ms + delay_ms2 / 2
+            #if delay_ms > delay_ms2:
+            #    return
+            
+
+            if abs(delay_ms) < 950:
+                if delay_ms > 680:
+                    """
+                    result = send_jsonrpc_request("Player.Seek", {
+                        "playerid": player_id,
+                        "value": {"step": "smallforward"}
+                    }) 
+                    if "error" in result:
+                        # Seek to new time
+                        result = send_jsonrpc_request("Player.Seek", {
+                            "playerid": player_id,
+                            "value": "smallforward"
+                        })  
+                    print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))      
+                    """          
+                return
+
+            # Get current playback time
+            result = send_jsonrpc_request("Player.GetProperties", {
+                "playerid": player_id,
+                "properties": ["time"]
+            })
+            print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
+            current_time = result['result']['time']
+
+            seconds = 0
+            total_milliseconds = current_time['milliseconds'] + delay_ms + 150
+            remaining_milliseconds = current_time['milliseconds']
+            # Convert total milliseconds to seconds and remaining milliseconds
+            seconds += total_milliseconds // 1000  # Integer division by 1000
+            remaining_milliseconds = total_milliseconds % 1000  # Modulo 1000 to get remaining milliseconds
+
+            new_time = {
+                "time": {
+                    "hours": current_time['hours'],
+                    "minutes": current_time['minutes'],
+                    "seconds": int(current_time['seconds'] + seconds),
+                    "milliseconds": int(abs(remaining_milliseconds))
+                }
+            }
+
+            # Seek to new time
+            if abs(seconds) >= 1:
+                result = send_jsonrpc_request("Player.Seek", {
+                    "playerid": player_id,
+                    "value": new_time
+                }) 
+                if "error" in result:
+                    # Seek to new time
+                    result = send_jsonrpc_request("Player.Seek", {
+                        "playerid": player_id,
+                        "value": new_time
+                    })  
+                print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
 
 def play_youtube_video_on_kodi(kodi_url, kodi_port, youtube_video_id):
     url = "http://{}:{}/jsonrpc".format(kodi_url, kodi_port)
@@ -385,7 +551,7 @@ def find_youtube_track(artist, track, current_time=0, duration=300, discid=None,
     use_cache = True
     print("should query Youtube?")
 
-    if discid is not None and 'videos' not in tracklist_dict[discid][trackNumber] or discid is not None and len(tracklist_dict[discid][trackNumber]['videos']) == 0:
+    if discid is not None and (tracklist_dict[discid][trackNumber].get('videos' == None) or (len(tracklist_dict[discid][trackNumber]['videos']) == 0)):
         print("querying youtube")
         search_response = YoutubeSearch(search_query, max_results=5).to_dict()
 
@@ -437,6 +603,8 @@ def find_youtube_track(artist, track, current_time=0, duration=300, discid=None,
 
 
 def recognize_song_from_buffer(duration = 300, time_offset = 0):
+    global audio_buffer
+
     wait_time = 5
     time.sleep(wait_time)
     # Convert audio data to a fingerprint

@@ -8,6 +8,7 @@ import sounddevice as sd
 import numpy as np
 import threading
 from pynput import keyboard
+from audio_recognition import AudioRecognition
 from fingerprinting.communication import recognize_song_from_signature
 from fingerprinting.algorithm import SignatureGenerator
 from collections import deque
@@ -29,7 +30,7 @@ import wave
 app = Flask(__name__)
 BUFFER_DURATION = 10  # seconds
 SAMPLERATE = 16000
-BUFFER_SIZE = BUFFER_DURATION * SAMPLERATE
+BUFFER_SIZE = 2 * BUFFER_DURATION * SAMPLERATE # int16 is 2 bytes, so multiply by 2
 audio_buffer = deque(maxlen=BUFFER_SIZE)
 API_KEY = 'AIzaSyCZqWOAx83JGiYA-bmWeHxuQILqf2dP4HY'  # Replace with your YouTube API key
 KODI_IP = '192.168.1.212'
@@ -188,6 +189,216 @@ def handle_cdplay():
 
     return jsonify({"message": "Recognition started"}), 202
 
+def list_to_wav_file(audio_data, file_name, sample_rate=SAMPLERATE):
+    with wave.open(file_name, 'wb') as wav_file:
+        # Set audio settings
+        n_channels = 1
+        sampwidth = 2  # 2 bytes because we use np.int16
+
+        # Set WAV file parameters
+        wav_file.setnchannels(n_channels)
+        wav_file.setsampwidth(sampwidth)
+        wav_file.setframerate(sample_rate)
+
+        # Write audio data to WAV file
+        wav_file.writeframes(audio_data.tobytes())
+
+def on_message(ws, message):
+    global start_time
+
+    data = json.loads(message)
+
+    if 'method' in data:
+        print(data['method'])
+        if data['method'] == 'Player.OnAVStart':
+            print("!!!!! Playback started")
+            # Get active players
+            result = send_jsonrpc_request("Player.GetActivePlayers")
+            print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
+            player_id = result['result'][0]['playerid']
+
+            # Get current playback time
+            result = send_jsonrpc_request("Player.GetProperties", {
+                "playerid": player_id,
+                "properties": ["time"]
+            })
+            print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
+            current_time = result['result']['time']
+            start_time2 = time.time() - start_time
+            #start_time2 -= 1
+            if start_time2 < 0:
+                start_time2 = 0
+            print("start time1 {}".format(start_time))
+            print("start time2 {}".format(start_time2))
+            new_time = {
+                "seconds": abs(current_time['seconds'] - int(start_time2)),
+            }
+
+            seconds = int(start_time2)  # Get the integer part (seconds)
+            milliseconds = int((start_time2 - seconds) * 1000)  # Get the fractional part and convert to milliseconds
+
+            total_milliseconds = current_time['milliseconds'] + milliseconds + 1300
+            remaining_milliseconds = 0
+            if total_milliseconds > 0:
+                # Convert total milliseconds to seconds and remaining milliseconds
+                seconds += total_milliseconds // 1000  # Integer division by 1000
+                remaining_milliseconds = total_milliseconds % 1000  # Modulo 1000 to get remaining milliseconds
+
+
+            new_time = {
+                "time": {
+                    "hours": current_time['hours'],
+                    "minutes": current_time['minutes'],
+                    "seconds": current_time['seconds'] + seconds,
+                    "milliseconds": remaining_milliseconds
+                }
+            }
+
+            # Seek to new time
+            result = send_jsonrpc_request("Player.Seek", {
+                "playerid": player_id,
+                "value": new_time
+            })    
+            if "error" in result:
+                # Seek to new time
+                result = send_jsonrpc_request("Player.Seek", {
+                    "playerid": player_id,
+                    "value": new_time
+                })    
+
+            #print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
+
+            time.sleep(BUFFER_DURATION + 5)
+            perform_cross_delay_check(player_id)
+            #time.sleep(BUFFER_DURATION + 10)
+            #perform_cross_delay_check(player_id)
+
+
+def perform_cross_delay_check(player_id):
+            print("cross audio lag check")
+            delay_ms = request_kodi_audio(False, True)
+            delay_ms2 = request_kodi_audio(True, False)
+            if delay_ms is None or delay_ms2 is None:
+                print("delay is 0ms")
+                return
+            
+            #if abs(delay_ms) > 700 and abs(delay_ms2) > 700 or int(delay_ms) == int(delay_ms2):
+            if abs(delay_ms) > 700 and abs(delay_ms2) > 700:
+                #delay_ms = delay_ms + delay_ms2 / 2
+                delay_ms = min(delay_ms, delay_ms2)
+            else:    
+                delay_ms = min(delay_ms, delay_ms2)
+                #delay_ms = delay_ms + delay_ms2 / 2
+            #if delay_ms > delay_ms2:
+            #    return
+            
+
+            # Get current playback time
+            result = send_jsonrpc_request("Player.GetProperties", {
+                "playerid": player_id,
+                "properties": ["time"]
+            })
+            print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
+            current_time = result['result']['time']
+
+            print("total calculated delay: {}".format(delay_ms))
+            seconds = 0
+            total_milliseconds = current_time['milliseconds'] + delay_ms
+            remaining_milliseconds = current_time['milliseconds']
+            # Convert total milliseconds to seconds and remaining milliseconds
+            seconds += total_milliseconds // 1000  # Integer division by 1000
+            remaining_milliseconds = total_milliseconds % 1000  # Modulo 1000 to get remaining milliseconds
+
+            new_time = {
+                "time": {
+                    "hours": current_time['hours'],
+                    "minutes": current_time['minutes'],
+                    "seconds": int(current_time['seconds'] + seconds),
+                    "milliseconds": int(abs(remaining_milliseconds))
+                }
+            }
+
+            # Seek to new time
+            if abs(delay_ms) > 260.0 and abs(delay_ms) < 2600.0:
+                result = send_jsonrpc_request("Player.Seek", {
+                    "playerid": player_id,
+                    "value": new_time
+                }) 
+                print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
+
+
+def request_kodi_audio(isFirstHalfOnly = False, isLastHalfOnly = True):
+    # Send POST request to server
+    response = requests.post("http://{}:5123/buffer".format(KODI_IP))
+
+    # Check if the request was successful
+    if response.status_code == 200:
+        # Read the binary data into a variable
+        received_audio_buffer = response.content
+
+        # Convert the binary data to numpy array
+        audio_data_remote = np.frombuffer(received_audio_buffer, dtype=np.int16)
+
+        audio_data_local = np.array(audio_buffer, dtype=np.int16)
+        audio_data_local = audio_data_local.tobytes()
+        audio_data_local = np.frombuffer(audio_data_local, dtype=np.int16)
+
+        #audio_data_local = copy.copy(np.array(audio_buffer).flatten().tolist())
+        #audio_data_remote = copy.copy(np.array(numpy_array).flatten().tolist())
+
+
+        # Convert the numpy array to a deque
+        #received_audio_deque = deque(numpy_array)    
+
+        audio_data_local = audio_data_local[:len(audio_data_local)//2]
+        audio_data_local = audio_data_local[:len(audio_data_local)//2]
+        #audio_data_remote = audio_data_remote[len(audio_data_remote)//2:]
+        #start_index = int(1 * SAMPLERATE)
+        #end_index = int(3 * SAMPLERATE)
+        #audio_data_remote = audio_data_remote[start_index:end_index]    
+        audio_data_remote = audio_data_remote[:len(audio_data_remote)//2]
+        audio_data_remote = audio_data_remote[:len(audio_data_remote)//2]
+        audio_data_remote = audio_data_remote[:len(audio_data_remote)//2]
+        audio_data_remote = audio_data_remote[:len(audio_data_remote)//2]
+        audio_data_remote = audio_data_remote[:len(audio_data_remote)//2]
+
+        #if isFirstHalfOnly:
+            #start_index = int(1 * SAMPLERATE)
+            #end_index = int(4 * SAMPLERATE)
+            #audio_data_local = audio_data_local[start_index:end_index]    
+            #audio_data_remote = audio_data_remote[start_index:end_index]    
+            #audio_data_local = audio_data_local[:len(audio_data_local)//2]
+            #audio_data_remote = audio_data_remote[:len(audio_data_remote)//2]
+        #if isLastHalfOnly:    
+            #start_index = int(0 * SAMPLERATE)
+            #end_index = int(5 * SAMPLERATE)
+            #audio_data_local = audio_data_local[len(audio_data_local)//2:]
+            #audio_data_remote = audio_data_remote[len(audio_data_remote)//2:]
+
+        list_to_wav_file(audio_data_local, 'audio_data_local.wav')      
+        list_to_wav_file(audio_data_remote, 'audio_data_remote.wav')     
+
+        # Preprocessing
+        #audio_data_local = bandpass_filter(audio_data_local, 100, 3600, SAMPLERATE)
+        #audio_data_remote = bandpass_filter(audio_data_remote, 100, 3600, SAMPLERATE)
+
+        audio_data_local = normalize(audio_data_local)
+        audio_data_remote = normalize(audio_data_remote)
+
+        #audio_data_local = extract_features(audio_data_local)
+        #audio_data_remote = extract_features(audio_data_remote)
+
+        # Find delay using cross-correlation
+        audio_recognition = AudioRecognition(audio_data_local, audio_data_remote)
+        distance = audio_recognition.get_average_delay3()
+
+        print("distance ms: {}".format(distance))
+        #print("path: {}".format(path))
+        return distance
+    else: 
+        return 0
+
+
 # Bandpass filter
 def bandpass_filter(signal, lowcut, highcut, fs, order=5):
     nyquist = 0.5 * fs
@@ -205,8 +416,11 @@ def extract_features(signal):
     return gaussian_filter1d(signal, 4)
 
 def find_delay(signal1, signal2, fs):
+    print("signal1: {}".format(signal1.shape))
+    print("signal2: {}".format(signal2.shape))
+
     # Use FFT to speed-up cross-correlation
-    correlation = correlate(signal1, signal2, method='fft')
+    correlation = correlate(signal1, signal2, mode='full', method='fft')
 
     # Find the lag position
     lag = np.argmax(np.abs(correlation))
@@ -218,61 +432,6 @@ def find_delay(signal1, signal2, fs):
     delay_ms = (actual_lag / fs) * 1000
 
     return delay_ms, actual_lag
-
-def list_to_wav_file(audio_data, file_name, sample_rate=SAMPLERATE):
-    with wave.open(file_name, 'wb') as wav_file:
-        # Set audio settings
-        n_channels = 1
-        sampwidth = 2  # 2 bytes because we use np.int16
-
-        # Set WAV file parameters
-        wav_file.setnchannels(n_channels)
-        wav_file.setsampwidth(sampwidth)
-        wav_file.setframerate(sample_rate)
-
-        # Write audio data to WAV file
-        wav_file.writeframes(audio_data.tobytes())
-
-def request_kodi_audio(isFirstHalfOnly = True):
-    # Send POST request to server
-    response = requests.post("http://{}:5123/buffer".format(KODI_IP))
-
-    # Check if the request was successful
-    if response.status_code == 200:
-        # Read the binary data into a variable
-        received_audio_buffer = response.content
-
-        # Convert the binary data to numpy array
-        audio_data_local = np.array(audio_buffer, dtype=np.int16)
-        audio_data_remote = np.frombuffer(received_audio_buffer, dtype=np.int16)
-
-        # Convert the numpy array to a deque
-        #received_audio_deque = deque(numpy_array)    
-
-        if isFirstHalfOnly:
-            audio_data_local = audio_data_local[:len(audio_data_local)//2]
-            audio_data_remote = audio_data_remote[:len(audio_data_remote)//2]
-
-        list_to_wav_file(audio_data_local, 'audio_data_local.wav')      
-        list_to_wav_file(audio_data_remote, 'audio_data_remote.wav')      
-
-        # Preprocessing
-        #audio_data_local = bandpass_filter(audio_data_local, 350, 1600, SAMPLERATE)
-        #audio_data_remote = bandpass_filter(audio_data_remote, 350, 1600, SAMPLERATE)
-
-        audio_data_local = normalize(audio_data_local)
-        audio_data_remote = normalize(audio_data_remote)
-
-        #audio_data_local = extract_features(audio_data_local)
-        #audio_data_remote = extract_features(audio_data_remote)
-
-        # Find delay using cross-correlation
-        delay_ms, actual_lag = find_delay(audio_data_remote, audio_data_local, SAMPLERATE)
-        print("delay_ms: {}".format(delay_ms))
-        print("actual_lag: {}".format(actual_lag))
-        return delay_ms
-    else: 
-        return 0
 
 
 def continuous_recording():
@@ -350,147 +509,6 @@ def send_jsonrpc_request(method, params={}, id=1):
     response = requests.post(url, data=json.dumps(payload), headers=headers)
     #response = requests.post(url, json=payload)
     return response.json()
-
-def on_message(ws, message):
-    global start_time
-
-    data = json.loads(message)
-
-    if 'method' in data:
-        print(data['method'])
-        if data['method'] == 'Player.OnAVStart':
-            print("!!!!! Playback started")
-            # Get active players
-            result = send_jsonrpc_request("Player.GetActivePlayers")
-            print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
-            player_id = result['result'][0]['playerid']
-
-            # Get current playback time
-            result = send_jsonrpc_request("Player.GetProperties", {
-                "playerid": player_id,
-                "properties": ["time"]
-            })
-            print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
-            current_time = result['result']['time']
-            start_time2 = time.time() - start_time
-            #start_time2 -= 1
-            if start_time2 < 0:
-                start_time2 = 0
-            print("start time1 {}".format(start_time))
-            print("start time2 {}".format(start_time2))
-            new_time = {
-                "seconds": abs(current_time['seconds'] - int(start_time2)),
-            }
-
-            seconds = int(start_time2)  # Get the integer part (seconds)
-            milliseconds = int((start_time2 - seconds) * 1000)  # Get the fractional part and convert to milliseconds
-
-            total_milliseconds = current_time['milliseconds'] + milliseconds + 1300
-            remaining_milliseconds = 0
-            if total_milliseconds > 0:
-                # Convert total milliseconds to seconds and remaining milliseconds
-                seconds += total_milliseconds // 1000  # Integer division by 1000
-                remaining_milliseconds = total_milliseconds % 1000  # Modulo 1000 to get remaining milliseconds
-
-
-            new_time = {
-                "time": {
-                    "hours": current_time['hours'],
-                    "minutes": current_time['minutes'],
-                    "seconds": current_time['seconds'] + seconds,
-                    "milliseconds": remaining_milliseconds
-                }
-            }
-
-            # Seek to new time
-            result = send_jsonrpc_request("Player.Seek", {
-                "playerid": player_id,
-                "value": new_time
-            })    
-            if "error" in result:
-                # Seek to new time
-                result = send_jsonrpc_request("Player.Seek", {
-                    "playerid": player_id,
-                    "value": new_time
-                })    
-
-            #print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
-
-            time.sleep(BUFFER_DURATION + seconds)
-            perform_cross_delay_check(player_id)
-            #time.sleep(BUFFER_DURATION + 10)
-            #perform_cross_delay_check(player_id)
-
-
-def perform_cross_delay_check(player_id):
-            print("cross audio lag check")
-            delay_ms = request_kodi_audio(True)
-            delay_ms2 = request_kodi_audio()
-            #if abs(delay_ms) > 700 and abs(delay_ms2) > 700 or int(delay_ms) == int(delay_ms2):
-            if abs(delay_ms) > 700 and abs(delay_ms2) > 700:
-                delay_ms = delay_ms + delay_ms2 / 2
-                #delay_ms = max(delay_ms, delay_ms2)
-            else:    
-                delay_ms = min(delay_ms, delay_ms2)
-                #delay_ms = delay_ms + delay_ms2 / 2
-            #if delay_ms > delay_ms2:
-            #    return
-            
-
-            if abs(delay_ms) < 950:
-                if delay_ms > 680:
-                    """
-                    result = send_jsonrpc_request("Player.Seek", {
-                        "playerid": player_id,
-                        "value": {"step": "smallforward"}
-                    }) 
-                    if "error" in result:
-                        # Seek to new time
-                        result = send_jsonrpc_request("Player.Seek", {
-                            "playerid": player_id,
-                            "value": "smallforward"
-                        })  
-                    print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))      
-                    """          
-                return
-
-            # Get current playback time
-            result = send_jsonrpc_request("Player.GetProperties", {
-                "playerid": player_id,
-                "properties": ["time"]
-            })
-            print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
-            current_time = result['result']['time']
-
-            seconds = 0
-            total_milliseconds = current_time['milliseconds'] + delay_ms + 150
-            remaining_milliseconds = current_time['milliseconds']
-            # Convert total milliseconds to seconds and remaining milliseconds
-            seconds += total_milliseconds // 1000  # Integer division by 1000
-            remaining_milliseconds = total_milliseconds % 1000  # Modulo 1000 to get remaining milliseconds
-
-            new_time = {
-                "time": {
-                    "hours": current_time['hours'],
-                    "minutes": current_time['minutes'],
-                    "seconds": int(current_time['seconds'] + seconds),
-                    "milliseconds": int(abs(remaining_milliseconds))
-                }
-            }
-
-            # Seek to new time
-            if abs(seconds) >= 1:
-                result = send_jsonrpc_request("Player.Seek", {
-                    "playerid": player_id,
-                    "value": new_time
-                }) 
-                if "error" in result:
-                    # Seek to new time
-                    result = send_jsonrpc_request("Player.Seek", {
-                        "playerid": player_id,
-                        "value": new_time
-                    })  
-                print(unidecode.unidecode(json.dumps(result,ensure_ascii = False)))
 
 def play_youtube_video_on_kodi(kodi_url, kodi_port, youtube_video_id):
     url = "http://{}:{}/jsonrpc".format(kodi_url, kodi_port)

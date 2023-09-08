@@ -12,3 +12,4 @@ websocket-client
 youtube-search
 typing
 scipy
+fastdtw

@@ -32,7 +32,6 @@ BUFFER_DURATION = 10  # seconds
 SAMPLERATE = 16000
 BUFFER_SIZE = 2 * BUFFER_DURATION * SAMPLERATE # int16 is 2 bytes, so multiply by 2
 audio_buffer = deque(maxlen=BUFFER_SIZE)
-API_KEY = 'AIzaSyCZqWOAx83JGiYA-bmWeHxuQILqf2dP4HY'  # Replace with your YouTube API key
 KODI_IP = '192.168.1.212'
 KODI_PORT = 8080 
 KODI_WEBSOCKET_PORT = 9090

@@ -1,6 +1,6 @@
-Flask
+Flask==0.10.1
 sounddevice==0.3.15
-numpy
+numpy==1.11.3
 keyboard==0.9.3
 pytz
 requests

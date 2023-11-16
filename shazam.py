@@ -124,7 +124,6 @@ def cddb():
     
     # Initialize MusicBrainz
     musicbrainzngs.set_useragent("Retrogaming CD to Youtube music video by CyberLuke", "0.9", "https://github.com/cyberluke")
-    #musicbrainzngs.set_email("info@nanotrik.cz")  # Set email
     
     try:
         # Query MusicBrainz by discid
@@ -174,17 +173,23 @@ def handle_cdplay():
     playState = request.args.get('playState')
 
     # Check if tracklist information exists for this discid
-    if discid in tracklist_dict and tracklist_dict[discid]:
-        #print(tracklist_dict[discid])
+    if discid in tracklist_dict and tracklist_dict[discid] and len(tracklist_dict[discid]) is not 0:
+        print(tracklist_dict[discid])
         #int(tracklist_dict[discid]["duration"])
-        tracklist_dict[discid][int(trackNumber)]["duration"] = int(duration)
-        executor.submit(find_youtube_track, tracklist_dict[discid][int(trackNumber)]["artist"], tracklist_dict[discid][int(trackNumber)]["track"], time.time(), int(duration), discid, int(trackNumber))
+        try:
+            tracklist_dict[discid][int(trackNumber)]["duration"] = int(duration)
+            executor.submit(find_youtube_track, tracklist_dict[discid][int(trackNumber)]["artist"], tracklist_dict[discid][int(trackNumber)]["track"], time.time(), int(duration), discid, int(trackNumber))
+        except IndexError or KeyError:
+            #trackNumber = len(tracklist_dict[discid]) - 1
+            #tracklist_dict[discid][int(trackNumber)]["duration"] = int(duration)
+            executor.submit(recognize_song_from_buffer, discid, trackNumber, int(duration), time.time())
+            return jsonify({"message": "Recognition started"}), 202
+
     else:    
-        time.sleep(0.1)
         #recognized_song = recognize_song_from_buffer()
         #print("Recognized song: {}".dumps(recognized_song, indent = 4, ensure_ascii = False))
         # Run recognize_song_from_buffer asynchronously
-        #executor.submit(recognize_song_from_buffer, int(duration), time.time())
+        executor.submit(recognize_song_from_buffer, discid, trackNumber, int(duration), time.time())
 
     return jsonify({"message": "Recognition started"}), 202
 
@@ -535,8 +540,11 @@ def play_youtube_video_on_kodi(kodi_url, kodi_port, youtube_video_id):
         print("Failed to send play command to Kodi. Status code: {}".format(response.status_code))
 
 def time_to_seconds(time_str):
-    minutes, seconds = map(int, time_str.split(":"))
-    return minutes * 60 + seconds
+    try:
+        minutes, seconds = map(int, time_str.split(":"))
+        return minutes * 60 + seconds
+    except ValueError:
+        return 3 * 60
 
 def filter_youtube_response(track, search_response, duration, title_contains=""):
         print("Look up: {}".format(title_contains))
@@ -568,7 +576,7 @@ def find_youtube_track(artist, track, current_time=0, duration=300, discid=None,
     use_cache = True
     print("should query Youtube?")
 
-    if discid is not None and (tracklist_dict[discid][trackNumber].get('videos' == None) or (len(tracklist_dict[discid][trackNumber]['videos']) == 0)):
+    if use_cache or discid is not None and (tracklist_dict[discid][trackNumber].get('videos') == None or (len(tracklist_dict[discid][trackNumber]['videos']) == 0)):
         print("querying youtube")
         search_response = YoutubeSearch(search_query, max_results=5).to_dict()
 
@@ -589,10 +597,14 @@ def find_youtube_track(artist, track, current_time=0, duration=300, discid=None,
 
         if discid is not None:
             print("Saving Youtube search results to DB")
+            if trackNumber not in tracklist_dict[discid]:
+                tracklist_dict[discid][trackNumber] = {}
             tracklist_dict[discid][trackNumber]["videos"] = top_3_video_ids
             tracklist_dict[discid][trackNumber]["videos_offsets"] = [0, 0, 0]
+            
             #tracklist_dict[discid][trackNumber]["videos_response"] = search_response
-            db_update_by_key('tracklist', tracklist_dict)
+            
+            #db_update_by_key('tracklist', tracklist_dict)
     else:
         print("using cached results")
         top_3_video_ids = tracklist_dict[discid][trackNumber]["videos"]  
@@ -619,15 +631,16 @@ def find_youtube_track(artist, track, current_time=0, duration=300, discid=None,
     return top_3_video_ids
 
 
-def recognize_song_from_buffer(duration = 300, time_offset = 0):
+def recognize_song_from_buffer(discid, trackNumber, duration = 300, time_offset = 0):
     global audio_buffer
 
-    wait_time = 5
+    wait_time = BUFFER_DURATION
     time.sleep(wait_time)
     # Convert audio data to a fingerprint
 
     signature_generator = SignatureGenerator()
     audio_data = copy.copy(np.array(audio_buffer).flatten().tolist())
+    audio_data = audio_data[:len(audio_data)//2]
     signature_generator.feed_input(audio_data)
 
     # Prefer starting at the middle at the song, and with a
@@ -645,19 +658,34 @@ def recognize_song_from_buffer(duration = 300, time_offset = 0):
         
         results = recognize_song_from_signature(signature)     
 
-
         if results['matches']:
-                    #print(dumps(results, indent = 4, ensure_ascii = False))
-                    # Accessing track title and subtitle
-                    track_title = results['track']['title']
-                    track_artist = results['track']['subtitle']
-                    find_youtube_track(track_artist, track_title, time_offset, duration)
-                    break
+            #print(dumps(results, indent = 4, ensure_ascii = False))
+            # Accessing track title and subtitle
+            track_artist = results['track']['subtitle']
+            track_title = results['track']['title']
+
+            track_list = tracklist_dict.get(discid, [])
+            track_list.append({
+                'artist': track_artist,
+                'track': unidecode.unidecode(track_title),
+                'duration': int(duration)
+            })
+                    
+            # Save tracklist in data structure
+            tracklist_dict[discid] = track_list            
+
+            db_update_by_key('tracklist', tracklist_dict)
+
+            find_youtube_track(track_artist, track_title, time_offset, duration, discid, trackNumber)
+            break
                 
         else:
-            
+            time_processed = (signature_generator.samples_processed / 16000)
             print(('[ Note: No matching songs for the first %g seconds, ' +
-                'typing to recognize more input... ]\n') % (signature_generator.samples_processed / 16000))
+                'typing to recognize more input... ]\n') % time_processed)
+            
+            if time_processed > 35:
+                return {}
             
             audio_data = copy.copy(np.array(audio_buffer).flatten().tolist())
             signature_generator.feed_input(audio_data)            
